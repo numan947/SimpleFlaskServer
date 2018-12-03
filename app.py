@@ -50,32 +50,105 @@ def loadModel(jsonPath,weightsPath):
 
 
 
+def adjust_gamma(image, gamma=1.0):
+	# build a lookup table mapping the pixel values [0, 255] to
+	# their adjusted gamma values
+	invGamma = 1.0 / gamma
+	table = np.array([((i / 255.0) ** invGamma) * 255
+		for i in np.arange(0, 256)]).astype("uint8")
+ 
+	# apply gamma correction using the lookup table
+	return cv2.LUT(image, table)
+
+
+
+from skimage import exposure
+from skimage import data, io, filters
+
+def connectedComp(img):
+
+	img = cv2.threshold(img, 105, 255, cv2.THRESH_BINARY)[1]  # ensure binary
+	ret, labels = cv2.connectedComponents(img)
+
+	# Map component labels to hue val
+	label_hue = np.uint8(179*labels/np.max(labels))
+	blank_ch = 255*np.ones_like(label_hue)
+	labeled_img = cv2.merge([label_hue, blank_ch, blank_ch])
+
+	# cvt to BGR for display
+	labeled_img = cv2.cvtColor(labeled_img, cv2.COLOR_HSV2BGR)
+
+	# set bg label to black
+	labeled_img[label_hue==0] = 0
+
+	return img
+
+def morph(input_image):
+	input_image = cv2.threshold(input_image, 254, 255, cv2.THRESH_BINARY)[1]
+	input_image_comp = cv2.bitwise_not(input_image)  # could just use 255-img
+
+	kernel1 = np.array([[0, 0, 0],
+						[0, 1, 0],
+						[0, 0, 0]], np.uint8)
+	kernel2 = np.array([[1, 1, 1],
+						[1, 0, 1],
+						[1, 1, 1]], np.uint8)
+
+	hitormiss1 = cv2.morphologyEx(input_image, cv2.MORPH_ERODE, kernel1)
+	hitormiss2 = cv2.morphologyEx(input_image_comp, cv2.MORPH_ERODE, kernel2)
+	hitormiss = cv2.bitwise_and(hitormiss1, hitormiss2)
+	return hitormiss
+
+
+
+def remove_isolated_pixels(image):
+	connectivity = 8
+
+	output = cv2.connectedComponentsWithStats(image, connectivity, cv2.CV_32S)
+
+	num_stats = output[0]
+	labels = output[1]
+	stats = output[2]
+
+	new_image = image.copy()
+
+	for label in range(num_stats):
+		if stats[label,cv2.CC_STAT_AREA] == 1:
+			new_image[labels == label] = 0
+
+	return new_image
+
 def process_image(imagePath):
 	image = cv2.imread(imagePath)
+
 	TARGET_SIZE = 400
 
 	centerX = image.shape[0]//2
 	centerY = image.shape[1]//2
 
+
+
 	startX = max(0,centerX-TARGET_SIZE//2)
 	startY = max(0,centerY-TARGET_SIZE//2)
 
-	cropped = image[startX:startX+TARGET_SIZE,startY:startY+TARGET_SIZE]
 
-	gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY) # convert to grayscale
-	# threshold to get just the signature
-	thresh_gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 99, 2)
+	# img = adjust_gamma(image,.5)
 
-	r = 200.0 / thresh_gray.shape[1]
-	dim = (200, int(thresh_gray.shape[0] * r))
-	 
-	# perform the actual resizing of the image and show it
-	resized = cv2.resize(thresh_gray, dim, interpolation = cv2.INTER_AREA)
-	resized = cv2.cvtColor(resized,cv2.COLOR_GRAY2RGB)
+	img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+	img = cv2.bilateralFilter(img,33,33,99)
+	# equ = cv2.equalizeHist(img)
+	equ = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 99, 2)
+	equ = connectedComp(equ)
+	# thresh_gray = connectedComp(thresh_gray)
+	# equ = cv2.addWeighted(equ,1.5,img,-0.5,0)
+
+
+	cropped = equ[startX:startX+TARGET_SIZE,startY:startY+TARGET_SIZE]
+
+	
+	resized = cv2.cvtColor(cropped,cv2.COLOR_GRAY2RGB)
 	resized = cv2.resize(resized, (RESIZE_DIM,RESIZE_DIM))
-	return resized
-
-
+	return cv2.fastNlMeansDenoising(resized,None,10,7,21)
 
 
 loaded_model = loadModel('./Classifier/trained_model.json','./Classifier/trained_model_weights.h5')
@@ -109,6 +182,7 @@ def classifyThisImage(imagePath):
 	print(imagePath)
 
 	processedImage = process_image(imagePath)
+	cv2.imwrite(imagePath+"1"+".png",processedImage)
 	processedImage = np.expand_dims(processedImage, axis=0)
 	processedImage = np.array(processedImage,dtype='float')/255.0
 
@@ -118,7 +192,9 @@ def classifyThisImage(imagePath):
 		print(processedImage.shape)
 	print(predictions)
 	print(predictions.argmax(axis=1))
-	return str(predictions.argmax(axis=1)[0]) 
+	print(len(predictions))
+	print(predictions)
+	return str(predictions.argmax(axis=1)[0]),str(predictions[0][predictions.argmax(axis=1)[0]]*100.0) 
 
 
 def handleFile(request,requestCode):
@@ -169,8 +245,8 @@ def handleFile(request,requestCode):
 		return json.dumps({'success': True}), 200, {'ContentType': 'application/json'}
 
 	elif(requestCode==2):
-		detectedLabel = classifyThisImage(CURRENT_FILE_PATH)
-		return json.dumps({'success': True, 'detectedLabel':detectedLabel}), 200, {'ContentType': 'application/json'}
+		detectedLabel,conf = classifyThisImage(CURRENT_FILE_PATH)
+		return json.dumps({'success': True, 'detectedLabel':detectedLabel+" \nconfidence: "+conf+"%"}), 200, {'ContentType': 'application/json'}
 
 
 
